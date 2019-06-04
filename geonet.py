@@ -26,12 +26,15 @@ from PyQt5.QtCore import QThread, QTime, QModelIndex, pyqtSignal
 from PyQt5.QtGui import QIcon, QStandardItemModel, QStandardItem
 from PyQt5.QtWidgets import QAction, QAbstractItemView, QProgressBar, QProgressDialog, QPushButton, QMessageBox
 from qgis.core import QgsVectorLayer, QgsProject, QgsFeature, QgsGeometry, QgsFeatureRequest, QgsWkbTypes
+from qgis.analysis import QgsGraph, QgsGraphAnalyzer
+from qgis.gui import QgsMapMouseEvent, QgsMapTool, QgsMapToolIdentify
 # Initialize Qt resources from file resources.py
 from .resources import *
 # Import the code for the dialog
 from .feat_input_dialog import FeatInputDialog
 from .geonet_result_view import GeonetTableView
 from collections import defaultdict
+import networkx as nx
 import os.path
 
 
@@ -166,8 +169,8 @@ class Geonet:
 
       self.add_action(
         'D:/Code/QGIS_Plugin/geonet/feature.png',
-        text=self.tr(u''),
-        callback=self.input_feature,
+        text=self.tr(u'Import feaure'),
+        callback=self.import_feature,
         parent=self.iface.mainWindow())
       
       self.add_action(
@@ -180,6 +183,18 @@ class Geonet:
         'D:/Code/QGIS_Plugin/geonet/pseudo.png',
         text=self.tr(u'Clean pseudo nodes'),
         callback=self.pseudo_clean,
+        parent=self.iface.mainWindow())
+
+      self.add_action(
+        'D:/Code/QGIS_Plugin/geonet/graph.png',
+        text=self.tr(u'Build graph'),
+        callback=self.graph_build,
+        parent=self.iface.mainWindow())
+      
+      self.add_action(
+        'D:/Code/QGIS_Plugin/geonet/shortpath.png',
+        text=self.tr(u'Shortest Path'),
+        callback=self.shortest_path,
         parent=self.iface.mainWindow())
 
       # init params
@@ -198,7 +213,12 @@ class Geonet:
       self.errPointList = []
       self.newFeatMap = {}
       self._id = 0
+      self.iNode = []
       self.featLayer = None
+      tool = PointTool(self.iface.mapCanvas())
+      tool.trigger.connect(self._add_node_selected)
+      self.iface.mapCanvas().setMapTool(tool)
+      # tool.activate()
       # will be set False in run()
       self.first_start = True
 
@@ -210,7 +230,7 @@ class Geonet:
               action)
           self.iface.removeToolBarIcon(action)
 
-  def input_feature(self):
+  def import_feature(self):
       """Run method that performs all the real work"""
 
       # Create the dialog with elements (after translation) and keep reference
@@ -219,6 +239,9 @@ class Geonet:
         self.first_start = False
         self.dlg = FeatInputDialog()
 
+      self.dlg.mLayerComboBox.clear()
+      self.errFeatMap.clear()
+      self.newFeatMap.clear()
       layers = list(QgsProject.instance().mapLayers().values())
       for layer in layers:
         if layer.type() == layer.VectorLayer:
@@ -237,7 +260,7 @@ class Geonet:
 
   def dangle_clean(self):
     if self.featLayer is None:
-      _warning = QMessageBox.warning(None, "Warning", "Please choose a feature first!")
+      QMessageBox.warning(None, "Warning", "Please choose a feature first!")
       return
 
     self.model.setHorizontalHeaderLabels(["Point_X", "Point_Y", "Feature ID"])
@@ -259,7 +282,7 @@ class Geonet:
 
   def pseudo_clean(self):
     if self.featLayer is None:
-      _warning = QMessageBox.warning(None, "Warning", "Please choose a feature first!")
+      QMessageBox.warning(None, "Warning", "Please choose a feature first!")
       return
 
     self.model.setHorizontalHeaderLabels(["Point_X", "Point_Y", "Feature ID"])
@@ -305,12 +328,27 @@ class Geonet:
       for idx, feat in enumerate(_father):
         feat_set[feat].append(idx)
 
-    self._render_corr_layer("pseudo", feat_set.values())
+      self._render_corr_layer("pseudo", feat_set.values())
 
     self.model.clear()
 
-  def graph_build(self): 
-    pass
+  def graph_build(self):
+    if self.featLayer is None:
+      QMessageBox.warning(None, "Warning", "Please choose a feature first!")
+      return
+    self.g = nx.Graph()
+
+    featIter = self.featLayer.getFeatures()
+    self.node_map = {}
+    self.weighted_edges = []
+    self.node_id = 0
+    list(map(self._map_point_to_edge, featIter))
+    self.g.add_weighted_edges_from(self.weighted_edges)
+
+    self._render_node_layer(self.g.nodes())
+
+  def shortest_path(self):
+    print("GG")
 
   def _map_point_to_feat(self, feat):
     geom = feat.geometry()
@@ -332,6 +370,30 @@ class Geonet:
       self.newFeatMap[new_feat.id()] = new_feat
       self.errFeatMap[startPoint].add(new_feat.id())
       self.errFeatMap[endPoint].add(new_feat.id())
+
+  def _map_point_to_edge(self, feat):
+      geom = feat.geometry()
+      weighted_edges = []
+      if geom.isMultipart():
+        for line in geom.asGeometryCollection():
+          startPoint, endPoint = line.asPolyline()[0], line.asPolyline()[-1]
+          # if startPoint not in self.node_map.keys():
+          #   startPoint_id = self.node_id
+          #   self.node_map[startPoint] = startPoint_id
+          #   self.node_id += 1
+          # else:
+          #   startPoint_id = self.node_map[startPoint]
+          # if endPoint not in self.node_map.keys():
+          #   endPoint_id = self.node_id
+          #   self.node_map[endPoint] = endPoint_id
+          #   self.node_id += 1
+          # else:
+          #   endPoint_id = self.node_map[endPoint]
+
+          self.weighted_edges.append((startPoint, endPoint, line.length()))
+      else:
+        startPoint, endPoint = geom.asPolyline()[0], geom.asPolyline()[-1]
+        self.weighted_edges.append((startPoint, endPoint, geom.length()))
 
   def _zoom_to_feat(self, item):
     # Clear previous selection
@@ -383,9 +445,24 @@ class Geonet:
     self.corrLayer.commitChanges()
     self._add_layer(self.corrLayer)
 
+  def _render_node_layer(self, _list):
+    self.nodeLayer = QgsVectorLayer("Point?crs=" + self.featLayer.crs().authid(), self.featLayer.name() +"_Graph_Vertex", "memory")
+    nodePr = self.nodeLayer.dataProvider()
+    self.nodeLayer.startEditing()
+
+    # Generate new features
+    feats = map(self._gen_point_feats, _list)
+    nodePr.addFeatures(feats)
+    self.nodeLayer.commitChanges()
+    self._add_layer(self.nodeLayer)
+
   def _add_layer(self, layer):
     QgsProject.instance().addMapLayer(layer)
   
+  def _add_node_selected(self, node):
+    self.iNode.append(node)
+    self.nodeLayer.select([x.id() for x in self.iNode])
+
   def _gen_point_feats(self, p):
     feat = QgsFeature()
     feat.setGeometry(QgsGeometry.fromPointXY(p))
@@ -407,7 +484,7 @@ class Geonet:
     return new_feat
 
 class WorkThread(QThread):
-  trigger = pyqtSignal()
+  closeTrigger = pyqtSignal()
   addLayerTrigger = pyqtSignal()
   def __init__(self, cleaner, parent=None):
     super(WorkThread, self).__init__(parent)
@@ -418,7 +495,7 @@ class WorkThread(QThread):
   def __del__(self):
     self.wait()
 
-  def run(self):
+  def run(self, func):
     # self.cleaner._pseudo_clean()
     self.trigger.emit()
     self.addLayerTrigger.emit()
@@ -430,3 +507,22 @@ class WaitProgressDialog(QProgressDialog):
     self.setMinimum(0)
     self.setWindowTitle("Wating... ")
     self.setFixedSize(400, 100)
+
+class PointTool(QgsMapTool):   
+  trigger = pyqtSignal(QgsFeature)
+  def __init__(self, canvas):
+    QgsMapTool.__init__(self, canvas)
+    self.canvas = canvas
+    self.identifier = QgsMapToolIdentify(canvas)
+
+  def canvasPressEvent(self, e):
+    x = e.pos().x()
+    y = e.pos().y()
+
+    point = self.canvas.getCoordinateTransform().toMapCoordinates(x, y)
+    indentifiedFeatures = self.identifier.identify(e.x(), e.y(), self.identifier.TopDownAll)
+    if len(indentifiedFeatures) > 0:
+      self.trigger.emit(indentifiedFeatures[0].mFeature)
+      # self.parent.iFeat.append(indentifiedFeatures[0].mFeature)
+      # self.parent.featLayer.setSelectedFeatures(self.parent.iFeat)
+      # print(self.parent.iFeat[-1].geometry())
