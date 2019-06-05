@@ -25,7 +25,7 @@ from PyQt5.QtCore import QSettings, QTranslator, qVersion, QCoreApplication
 from PyQt5.QtCore import QThread, QTime, QModelIndex, pyqtSignal
 from PyQt5.QtGui import QIcon, QStandardItemModel, QStandardItem
 from PyQt5.QtWidgets import QAction, QAbstractItemView, QProgressBar, QProgressDialog, QPushButton, QMessageBox
-from qgis.core import QgsVectorLayer, QgsProject, QgsFeature, QgsGeometry, QgsFeatureRequest, QgsWkbTypes
+from qgis.core import QgsVectorLayer, QgsArrowSymbolLayer, QgsPointXY, QgsProject, QgsFeature, QgsGeometry, QgsFeatureRequest, QgsWkbTypes, QgsLineSymbol
 from qgis.analysis import QgsGraph, QgsGraphAnalyzer
 from qgis.gui import QgsMapMouseEvent, QgsMapTool, QgsMapToolIdentify
 # Initialize Qt resources from file resources.py
@@ -215,10 +215,11 @@ class Geonet:
       self._id = 0
       self.iNode = []
       self.featLayer = None
-      tool = PointTool(self.iface.mapCanvas())
-      tool.trigger.connect(self._add_node_selected)
-      self.iface.mapCanvas().setMapTool(tool)
-      # tool.activate()
+      self.g = None
+      self.tool = PointTool(self.iface.mapCanvas())
+      self.tool.trigger.connect(self._add_node_selected)
+      self.iface.mapCanvas().setMapTool(self.tool)
+      
       # will be set False in run()
       self.first_start = True
 
@@ -257,6 +258,8 @@ class Geonet:
           lineFeatIter = self.featLayer.getFeatures()
           # Find pseudo points
           list(map(self._map_point_to_feat, lineFeatIter))
+
+      self.tool.activate()
 
   def dangle_clean(self):
     if self.featLayer is None:
@@ -298,37 +301,16 @@ class Geonet:
 
     result = self.resDlg.exec_()
     if result:
-      # Union find feature set
-      featCount = len(self.newFeatMap)
-      _father = [i for i in range(0, featCount)]
-      _rank = [0] * featCount
-      def _find(x):
-        if _father[x] != x:
-          _father[x] = _find(_father[x])
-        return _father[x]
+      self.pBar = WaitProgressDialog()
+      self.thread = WorkThread(net=self)
+      cancelButton = QPushButton("Cancel")
+      self.pBar.setCancelButton(cancelButton)
+      cancelButton.clicked.connect(self.thread.terminate)
+      cancelButton.setGeometry(100, 100, 100, 100)
+      self.pBar.show()        
+      self.thread.start()    
 
-      def _union(x, y):
-        _x = _find(x)
-        _y = _find(y)
-        if _x == _y:
-          return
-        if _rank[_x] < _rank[_y]:
-          _father[_x] = _y
-        elif _rank[_x] > _rank[_y]:
-          _father[_y] = _x
-        else:
-          _father[_y] = _x
-          _rank[x] += 1
-
-      for (_, feat_ids) in self.errFeatMap.items():
-        feat_ids = list(feat_ids)
-        for feat_id in feat_ids[1:]:
-          _union(feat_id, feat_ids[0])
-      feat_set = defaultdict(list)
-      for idx, feat in enumerate(_father):
-        feat_set[feat].append(idx)
-
-      self._render_corr_layer("pseudo", feat_set.values())
+      # self._render_corr_layer("pseudo", feat_set.values())
 
     self.model.clear()
 
@@ -340,15 +322,62 @@ class Geonet:
 
     featIter = self.featLayer.getFeatures()
     self.node_map = {}
+    self.node_set = set()
     self.weighted_edges = []
     self.node_id = 0
     list(map(self._map_point_to_edge, featIter))
     self.g.add_weighted_edges_from(self.weighted_edges)
-
+    
     self._render_node_layer(self.g.nodes())
+    # self.tool.activate()
 
   def shortest_path(self):
-    print("GG")
+    
+    if self.g is None:
+      QMessageBox.warning(None, "Warning", "Please build the graph first!")
+      return
+    if len(self.iNode) > 1:
+      startNode, endNode = self.iNode[0].geometry().asPoint(), self.iNode[1].geometry().asPoint()
+      _route = nx.shortest_path(self.g, startNode, endNode)
+      self.iNode.clear()
+      self.featLayer.removeSelection()
+      self.canvas.refresh()
+      self._render_route_layer(_route)
+      # self.tool.deactivate()
+
+  def _clean_work_by_thread(self):
+    print("----- Clean work start -----")
+    # Union find feature set
+    featCount = len(self.newFeatMap)
+    _father = [i for i in range(0, featCount)]
+    _rank = [0] * featCount
+    def _find(x):
+      if _father[x] != x:
+        _father[x] = _find(_father[x])
+      return _father[x]
+
+    def _union(x, y):
+      _x = _find(x)
+      _y = _find(y)
+      if _x == _y:
+        return
+      if _rank[_x] < _rank[_y]:
+        _father[_x] = _y
+      elif _rank[_x] > _rank[_y]:
+        _father[_y] = _x
+      else:
+        _father[_y] = _x
+        _rank[x] += 1
+
+    for (_, feat_ids) in self.errFeatMap.items():
+      feat_ids = list(feat_ids)
+      for feat_id in feat_ids[1:]:
+        _union(feat_id, feat_ids[0])
+    feat_set = defaultdict(list)
+    for idx, feat in enumerate(_father):
+      feat_set[feat].append(idx)
+    print('----- Render work start -----')
+    self._render_corr_layer("pseudo", feat_set.values())
 
   def _map_point_to_feat(self, feat):
     geom = feat.geometry()
@@ -377,23 +406,22 @@ class Geonet:
       if geom.isMultipart():
         for line in geom.asGeometryCollection():
           startPoint, endPoint = line.asPolyline()[0], line.asPolyline()[-1]
-          # if startPoint not in self.node_map.keys():
-          #   startPoint_id = self.node_id
-          #   self.node_map[startPoint] = startPoint_id
-          #   self.node_id += 1
-          # else:
-          #   startPoint_id = self.node_map[startPoint]
-          # if endPoint not in self.node_map.keys():
-          #   endPoint_id = self.node_id
-          #   self.node_map[endPoint] = endPoint_id
-          #   self.node_id += 1
-          # else:
-          #   endPoint_id = self.node_map[endPoint]
-
+          startNode = QgsFeature()
+          startNode.setGeometry(QgsGeometry.fromPointXY(startPoint))
+          # self.node_id += 1
+          endNode = QgsFeature()
+          endNode.setGeometry(QgsGeometry.fromPointXY(endPoint))
+          # self.node_id += 1
           self.weighted_edges.append((startPoint, endPoint, line.length()))
       else:
         startPoint, endPoint = geom.asPolyline()[0], geom.asPolyline()[-1]
-        self.weighted_edges.append((startPoint, endPoint, geom.length()))
+        startNode = QgsFeature(self.node_id)
+        startNode.setGeometry(QgsGeometry.fromPointXY(startPoint))
+        self.node_id += 1
+        endNode = QgsFeature(self.node_id)
+        endNode.setGeometry(QgsGeometry.fromPointXY(endPoint))
+        self.node_id += 1
+        self.weighted_edges.append((startNode, endNode, geom.length()))
 
   def _zoom_to_feat(self, item):
     # Clear previous selection
@@ -443,7 +471,25 @@ class Geonet:
     feats = map(self._gen_corr_feats, _list)
     corrPr.addFeatures(feats)
     self.corrLayer.commitChanges()
-    self._add_layer(self.corrLayer)
+
+    # self._add_layer(self.corrLayer)
+
+  def _render_route_layer(self, _list):
+    self.routeLayer = QgsVectorLayer("LineString?crs=" + self.featLayer.crs().authid(),self.featLayer.name() + "_Route", "memory")  
+    routePr = self.routeLayer.dataProvider()
+    self.routeLayer.startEditing()
+    _symbol = QgsLineSymbol()
+    _symbol.appendSymbolLayer(QgsArrowSymbolLayer())
+    self.routeLayer.renderer().setSymbol(_symbol) 
+    for idx in range(len(_list) - 1):
+      route_seg = [_list[idx], _list[idx + 1]]
+      feat = QgsFeature()
+      feat.setGeometry(QgsGeometry.fromPolylineXY(route_seg))
+      routePr.addFeatures([feat])
+    self.routeLayer.commitChanges()
+    
+    self._add_layer(self.routeLayer)
+    # self.canvas.refresh()  
 
   def _render_node_layer(self, _list):
     self.nodeLayer = QgsVectorLayer("Point?crs=" + self.featLayer.crs().authid(), self.featLayer.name() +"_Graph_Vertex", "memory")
@@ -452,6 +498,7 @@ class Geonet:
 
     # Generate new features
     feats = map(self._gen_point_feats, _list)
+    # feats = _list
     nodePr.addFeatures(feats)
     self.nodeLayer.commitChanges()
     self._add_layer(self.nodeLayer)
@@ -483,21 +530,25 @@ class Geonet:
     new_feat.setGeometry(geom)
     return new_feat
 
+  def _add_corr_layer(self):
+    QgsProject.instance().addMapLayer(self.corrLayer)
+
 class WorkThread(QThread):
   closeTrigger = pyqtSignal()
   addLayerTrigger = pyqtSignal()
-  def __init__(self, cleaner, parent=None):
+  def __init__(self, net, parent=None):
     super(WorkThread, self).__init__(parent)
-    self.cleaner = cleaner
-    self.trigger.connect(self.cleaner.pBar.close)
-    self.addLayerTrigger.connect(self.cleaner._add_layer)
+    self.net = net
+    self.closeTrigger.connect(self.net.pBar.close)
+    self.addLayerTrigger.connect(self.net._add_corr_layer)
 
   def __del__(self):
     self.wait()
 
-  def run(self, func):
-    # self.cleaner._pseudo_clean()
-    self.trigger.emit()
+  def run(self):
+    print("----- thread start -----")
+    self.net._clean_work_by_thread()
+    self.closeTrigger.emit()
     self.addLayerTrigger.emit()
        
 class WaitProgressDialog(QProgressDialog):
@@ -523,6 +574,3 @@ class PointTool(QgsMapTool):
     indentifiedFeatures = self.identifier.identify(e.x(), e.y(), self.identifier.TopDownAll)
     if len(indentifiedFeatures) > 0:
       self.trigger.emit(indentifiedFeatures[0].mFeature)
-      # self.parent.iFeat.append(indentifiedFeatures[0].mFeature)
-      # self.parent.featLayer.setSelectedFeatures(self.parent.iFeat)
-      # print(self.parent.iFeat[-1].geometry())
