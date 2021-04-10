@@ -168,31 +168,31 @@ class Geonet:
       """Create the menu entries and toolbar icons inside the QGIS GUI."""
 
       self.add_action(
-        'D:/Code/QGIS_Plugin/geonet/feature.png',
+        os.path.join(os.getcwd(), 'feature.png'),
         text=self.tr(u'Import feaure'),
         callback=self.import_feature,
         parent=self.iface.mainWindow())
       
       self.add_action(
-        'D:/Code/QGIS_Plugin/geonet/dangle.png',
+        os.path.join(os.getcwd(), 'dangle.png')
         text=self.tr(u'Clean dangle nodes'),
         callback=self.dangle_clean,
         parent=self.iface.mainWindow())
       
       self.add_action(
-        'D:/Code/QGIS_Plugin/geonet/pseudo.png',
+        os.path.join(os.getcwd(), 'pseudo.png')
         text=self.tr(u'Clean pseudo nodes'),
         callback=self.pseudo_clean,
         parent=self.iface.mainWindow())
 
       self.add_action(
-        'D:/Code/QGIS_Plugin/geonet/graph.png',
+        os.path.join(os.getcwd(), 'graph.png')
         text=self.tr(u'Build graph'),
         callback=self.graph_build,
         parent=self.iface.mainWindow())
       
       self.add_action(
-        'D:/Code/QGIS_Plugin/geonet/shortpath.png',
+        os.path.join(os.getcwd(), 'shortpath.png')
         text=self.tr(u'Shortest Path'),
         callback=self.shortest_path,
         parent=self.iface.mainWindow())
